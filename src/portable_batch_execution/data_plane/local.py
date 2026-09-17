@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from hashlib import sha256
 from pathlib import Path
 from threading import RLock
@@ -13,7 +14,9 @@ from portable_batch_execution.contracts import (
 )
 from portable_batch_execution.controller.closed_wave_registry import safe_file_component
 
-from .base import RevisionConflictError
+from .base import ArtifactContentStream, RevisionConflictError
+
+_ARTIFACT_CHUNK_BYTES = 64 * 1024
 
 
 class LocalFilesystemDataPlane:
@@ -62,6 +65,22 @@ class LocalFilesystemDataPlane:
         if path.parent != self._artifacts or path.name != ref.object_id:
             raise ValueError("artifact ref is outside this data plane")
         return path.read_bytes()
+
+    def open_content(self, ref: ArtifactRef) -> ArtifactContentStream:
+        """Stream artifact bytes in bounded chunks without whole-object reads."""
+        path = self._artifact_path(ref)
+        if path.parent != self._artifacts or path.name != ref.object_id:
+            raise ValueError("artifact ref is outside this data plane")
+        return ArtifactContentStream(
+            size_bytes=path.stat().st_size,
+            chunks=self._iter_artifact_chunks(path),
+        )
+
+    @staticmethod
+    def _iter_artifact_chunks(path: Path) -> Iterator[bytes]:
+        with path.open("rb") as handle:
+            while chunk := handle.read(_ARTIFACT_CHUNK_BYTES):
+                yield chunk
 
     def exists(self, ref: ArtifactRef) -> bool:
         try:

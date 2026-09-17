@@ -5,6 +5,7 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from .base import ArtifactContentStream
 from .service import PrivateDataPlaneService
 
 _LOOPBACK_BIND_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -74,11 +75,20 @@ class _PrivateDataPlaneHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         for key, value in headers.items():
             self.send_header(key, value)
+        if not isinstance(payload, ArtifactContentStream):
+            data = _response_bytes(payload)
+            if data:
+                self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        if method == "HEAD":
+            return
+        if isinstance(payload, ArtifactContentStream):
+            for chunk in payload.chunks:
+                if chunk:
+                    self.wfile.write(chunk)
+            return
         data = _response_bytes(payload)
         if data:
-            self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        if method != "HEAD" and data:
             self.wfile.write(data)
 
     def do_GET(self) -> None:

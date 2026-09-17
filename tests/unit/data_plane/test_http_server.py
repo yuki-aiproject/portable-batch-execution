@@ -1,11 +1,36 @@
+import threading
 from io import BytesIO
 
+import httpx
 import pytest
 
 from portable_batch_execution.data_plane.http_server import (
     require_loopback_bind_host,
     serve_private_data_plane,
 )
+
+
+def test_large_artifact_get_streams_over_loopback(tmp_path):
+    server = serve_private_data_plane(tmp_path, "plane-token", port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base_url = f"http://127.0.0.1:{server.server_address[1]}"
+        headers = {"Authorization": "Bearer plane-token"}
+        data = bytes(range(256)) * 8192
+        with httpx.Client(base_url=base_url, timeout=10.0) as client:
+            written = client.post("/v1/artifacts", content=data, headers=headers)
+            assert written.status_code == 200
+            object_id = written.json()["object_id"]
+            served = client.get(f"/v1/artifacts/{object_id}/content", headers=headers)
+        assert served.status_code == 200
+        assert served.headers["Content-Type"] == "application/octet-stream"
+        assert served.headers["Content-Length"] == str(len(data))
+        assert served.content == data
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_unauthorized_request_does_not_read_request_body(tmp_path):

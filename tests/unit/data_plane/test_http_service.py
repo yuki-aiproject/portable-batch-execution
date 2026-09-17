@@ -60,19 +60,52 @@ def test_artifact_write_read_and_head(tmp_path):
     assert status == 200
     ref = json.loads(body or b"{}")
     object_id = ref["object_id"]
-    get_status, _, payload = service.dispatch(
+    get_status, get_headers, payload = service.dispatch(
         "GET",
         f"/v1/artifacts/{object_id}/content",
         authorization="Bearer plane-token",
     )
-    assert get_status == 200 and payload == b"[{\"value\":1}]"
+    assert get_status == 200
+    assert get_headers["Content-Type"] == "application/octet-stream"
+    assert get_headers["Content-Length"] == "13"
+    assert b"".join(payload.chunks) == b"[{\"value\":1}]"
     head_status, head_headers, _ = service.dispatch(
         "HEAD",
         f"/v1/artifacts/{object_id}/content",
         authorization="Bearer plane-token",
     )
     assert head_status == 200
-    assert head_headers["Content-Length"] == str(len(payload or b""))
+    assert head_headers["Content-Length"] == "13"
+
+
+def test_large_artifact_get_streams_without_whole_object_read(tmp_path, monkeypatch):
+    service = _service(tmp_path)
+    data = bytes(range(256)) * 4096
+    status, _, body = service.dispatch(
+        "POST",
+        "/v1/artifacts",
+        authorization="Bearer plane-token",
+        body=data,
+    )
+    assert status == 200
+    object_id = json.loads(body or b"{}")["object_id"]
+
+    def reject_read(ref):
+        raise AssertionError("whole-object read path must not be used for artifact GET")
+
+    monkeypatch.setattr(service.store, "read", reject_read)
+    get_status, get_headers, payload = service.dispatch(
+        "GET",
+        f"/v1/artifacts/{object_id}/content",
+        authorization="Bearer plane-token",
+    )
+    assert get_status == 200
+    assert get_headers["Content-Length"] == str(len(data))
+    assert get_headers["Content-Type"] == "application/octet-stream"
+    assert payload.size_bytes == len(data)
+    chunks = list(payload.chunks)
+    assert len(chunks) > 1
+    assert b"".join(chunks) == data
 
 
 def test_attempts_are_immutable(tmp_path):

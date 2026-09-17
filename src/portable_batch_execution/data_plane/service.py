@@ -16,6 +16,7 @@ from portable_batch_execution.controller.closed_wave_registry import (
     ClosedWaveRegistry,
     opaque_identifier,
 )
+from portable_batch_execution.data_plane.base import ArtifactContentStream
 from portable_batch_execution.data_plane.local import LocalFilesystemDataPlane
 
 
@@ -48,7 +49,7 @@ class PrivateDataPlaneService:
         authorization: str | None,
         headers: dict[str, str] | None = None,
         body: bytes | None = None,
-    ) -> tuple[int, dict[str, str], bytes | None]:
+    ) -> tuple[int, dict[str, str], bytes | ArtifactContentStream | None]:
         if not self.authorize(authorization):
             return 401, {"Content-Type": "application/json"}, b'{"error":"unauthorized"}'
         headers = {key.lower(): value for key, value in (headers or {}).items()}
@@ -69,10 +70,17 @@ class PrivateDataPlaneService:
                     uri=artifact_path.as_uri(),
                     sha256=f"sha256:{object_id}",
                 )
-                data = self.store.read(ref)
+                stream = self.store.open_content(ref)
                 if method == "HEAD":
-                    return 200, {"Content-Length": str(len(data))}, b""
-                return 200, {"Content-Type": "application/octet-stream"}, data
+                    return 200, {"Content-Length": str(stream.size_bytes)}, b""
+                return (
+                    200,
+                    {
+                        "Content-Type": "application/octet-stream",
+                        "Content-Length": str(stream.size_bytes),
+                    },
+                    stream,
+                )
             if method == "POST" and segments == ["v1", "artifacts"]:
                 ref = self.store.write(body or b"", headers.get("content-type"))
                 return 200, {"Content-Type": "application/json"}, ref.model_dump_json().encode("utf-8")

@@ -20,6 +20,10 @@ from .base import RevisionConflictError
 class PrivateDataPlaneError(RuntimeError):
     """An error intentionally containing operation/status, never response data."""
 
+
+_HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
+
+
 class HttpPrivateDataPlane:
     def __init__(self, base_url: str, bearer_token: str, *, client: httpx.Client | None = None):
         parsed = urlsplit(base_url)
@@ -35,7 +39,7 @@ class HttpPrivateDataPlane:
         if not bearer_token:
             raise ValueError("private data plane bearer token is required")
         self.base_url = base_url.rstrip("/")
-        self._client = client or httpx.Client()
+        self._client = client or httpx.Client(timeout=_HTTP_TIMEOUT)
         self._client.headers.setdefault("Authorization", f"Bearer {bearer_token}")
 
     @classmethod
