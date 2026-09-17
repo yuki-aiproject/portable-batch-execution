@@ -15,6 +15,14 @@ BUCKET_COUNT_MIN = 1
 BUCKET_COUNT_MAX = 4096
 
 
+class JsonScalarProjection(Frozen):
+    schema_version: Literal["pbe.replay.json-scalar-projection.v1"]
+    source_column: str = Field(min_length=1)
+    key_path: tuple[str, ...] = Field(min_length=1)
+    scalar_type: Literal["integer", "string"]
+    output_column: str = Field(min_length=1)
+
+
 class SentinelPredicate(Frozen):
     identity_equals: int
     exact_match_fields: dict[str, SentinelScalar] = Field(default_factory=dict)
@@ -27,6 +35,14 @@ class StructuralCanonicalizeParams(Frozen):
     measurement_core_fields: tuple[str, ...] = Field(min_length=1)
     sentinel: SentinelPredicate | None = None
     bucket_count: int = BUCKET_COUNT_DEFAULT
+    json_scalar_projections: tuple[JsonScalarProjection, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_json_scalar_projections(self) -> StructuralCanonicalizeParams:
+        from .json_scalar_projection import validate_json_scalar_projection_bundle
+
+        validate_json_scalar_projection_bundle(self.json_scalar_projections)
+        return self
 
     @field_validator("bucket_count")
     @classmethod
@@ -70,6 +86,14 @@ class CanonicalTradeProfile(Frozen):
     identity_normalized_column: str
     measurement_core_fields: tuple[str, ...] = Field(min_length=1)
     sentinel: SentinelPredicate | None = None
+    json_scalar_projections: tuple[JsonScalarProjection, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_json_scalar_projections(self) -> CanonicalTradeProfile:
+        from .json_scalar_projection import validate_json_scalar_projection_bundle
+
+        validate_json_scalar_projection_bundle(self.json_scalar_projections)
+        return self
 
     def structural_canonicalize_params(self) -> StructuralCanonicalizeParams:
         return StructuralCanonicalizeParams(
@@ -78,6 +102,7 @@ class CanonicalTradeProfile(Frozen):
             identity_normalized_column=self.identity_normalized_column,
             measurement_core_fields=self.measurement_core_fields,
             sentinel=self.sentinel,
+            json_scalar_projections=self.json_scalar_projections,
         )
 
 

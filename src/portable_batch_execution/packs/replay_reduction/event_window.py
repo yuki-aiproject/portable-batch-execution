@@ -15,6 +15,10 @@ from .canonicalize import (
     _require_columns,
     execute_structural_canonicalize,
 )
+from .json_scalar_projection import (
+    JsonScalarProjectionError,
+    apply_json_scalar_projections_to_lazy,
+)
 from .models import EventWindowExtractRequest, SentinelPredicate
 
 RESULT_SCHEMA_VERSION = "pbe.replay.event-window-extract-result.v2"
@@ -172,6 +176,11 @@ def _validate_positive_row(
 
 def _symbol_lazy_frame(path: str | Path, model: EventWindowExtractRequest) -> pl.LazyFrame:
     lazy = pl.scan_parquet(str(path))
+    profile = model.canonical_trade_profile
+    try:
+        lazy = apply_json_scalar_projections_to_lazy(lazy, profile.json_scalar_projections)
+    except JsonScalarProjectionError as exc:
+        raise StructuralCanonicalizeError(str(exc)) from exc
     _require_columns(
         lazy.collect_schema(),
         (
@@ -187,7 +196,6 @@ def _symbol_lazy_frame(path: str | Path, model: EventWindowExtractRequest) -> pl
             *(spec.measurement_field for spec in model.future_windows),
         ),
     )
-    profile = model.canonical_trade_profile
     sentinel = profile.sentinel
     required_sentinel = tuple(sentinel.exact_match_fields) if sentinel is not None else ()
     if required_sentinel:
