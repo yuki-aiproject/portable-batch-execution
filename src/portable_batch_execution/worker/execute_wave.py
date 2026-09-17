@@ -1,8 +1,15 @@
-"""Closed public-synthetic worker entry point for one already planned wave."""
+"""Closed public-synthetic worker entry point for one already planned wave.
+
+This module imports no domain pack at import time.  The tabular, ML, and media
+implementations -- and therefore polars, scikit-learn, torch, transformers, and
+the FFmpeg-backed media pack -- are imported only inside the execution path that
+needs them, so a tabular job bootstraps without the unrelated heavy stacks.
+"""
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import re
 import tempfile
@@ -10,6 +17,7 @@ from contextlib import nullcontext
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 from portable_batch_execution.contracts import (
     ArtifactRef,
@@ -19,49 +27,41 @@ from portable_batch_execution.contracts import (
     WaveSpec,
 )
 from portable_batch_execution.data_plane import LocalFilesystemDataPlane
-from portable_batch_execution.packs import MediaPack, TabularPack
-from portable_batch_execution.packs.ml.char_wb_tfidf_logistic_score import (
-    execute_char_wb_tfidf_logistic_score,
+from portable_batch_execution.worker import runtime_profile as _runtime_profile
+
+_PRIVATE_TABULAR_SINGLE_INPUT_OPS = _runtime_profile.TABULAR_SINGLE_INPUT_OPERATIONS
+_PRIVATE_TABULAR_TWO_TABLE_OPS = _runtime_profile.TABULAR_TWO_TABLE_OPERATIONS
+_PRIVATE_TABULAR_FEATURE_REQUEST_OPS = _runtime_profile.TABULAR_FEATURE_REQUEST_OPERATIONS
+_PRIVATE_TABULAR_UNAVAILABLE_MULTI_INPUT_OPS = (
+    _runtime_profile.TABULAR_UNAVAILABLE_OPERATIONS
 )
-from portable_batch_execution.packs.ml.cosine_similarity_matrix import (
-    execute_cosine_similarity_matrix,
-)
-from portable_batch_execution.packs.ml.distilbert_pair_binary_scores import (
-    execute_distilbert_pair_binary_scores,
-)
+_PRIVATE_ML_SINGLE_INPUT_OPS = _runtime_profile.ML_SINGLE_INPUT_OPERATIONS
+_PRIVATE_ML_FIVE_INPUT_OPS = _runtime_profile.ML_FIVE_INPUT_OPERATIONS
+_PRIVATE_MEDIA_SINGLE_INPUT_OPS = _runtime_profile.MEDIA_SINGLE_INPUT_OPERATIONS
 
 _WAVE_ID = re.compile(r"wave-[0-9]{4}")
 _PUBLIC_WAVES = frozenset({"wave-0000"})
-_PRIVATE_TABULAR_SINGLE_INPUT_OPS = frozenset(
-    {
-        "tabular.normalize",
-        "tabular.cast",
-        "tabular.sort",
-        "tabular.dedup",
-        "tabular.window",
-        "tabular.rolling",
-        "tabular.statistics",
-        "tabular.text_event_features.v1",
-    }
-)
-_PRIVATE_TABULAR_TWO_TABLE_OPS = frozenset(
-    {
-        "tabular.join",
-        "tabular.pit_join",
-    }
-)
-_PRIVATE_TABULAR_FEATURE_REQUEST_OPS = frozenset(
-    {"tabular.trailing_sparse_window_aggregate.v1"}
-)
-_PRIVATE_TABULAR_UNAVAILABLE_MULTI_INPUT_OPS = frozenset({"tabular.format_migration"})
-_PRIVATE_ML_SINGLE_INPUT_OPS = frozenset(
-    {
-        "ml.char_wb_tfidf_logistic_score",
-        "ml.cosine_similarity_matrix",
-    }
-)
-_PRIVATE_ML_FIVE_INPUT_OPS = frozenset({"ml.distilbert_pair_binary_scores"})
-_PRIVATE_MEDIA_SINGLE_INPUT_OPS = frozenset({"media.asr_normalize_flac"})
+
+_LAZY_PACK_EXPORTS = {
+    "TabularPack": ("portable_batch_execution.packs.tabular", "TabularPack"),
+    "MediaPack": ("portable_batch_execution.packs.media", "MediaPack"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve the tabular/media packs on demand for backward-compatible callers.
+
+    Importing this module must not import any domain pack.  Attribute access such
+    as ``execute_wave.TabularPack`` still resolves lazily so existing imports and
+    ``unittest.mock.patch`` targets keep working.
+    """
+    try:
+        module_name, attribute = _LAZY_PACK_EXPORTS[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+    value = getattr(importlib.import_module(module_name), attribute)
+    globals()[name] = value
+    return value
 
 
 class PrivateWaveExecutionError(RuntimeError):
@@ -241,6 +241,8 @@ def execute_public_wave(
         rows = json.loads(data_path.read_text(encoding="utf-8"))
         if not isinstance(rows, list):
             raise TypeError("public synthetic input must be a record array")
+        from portable_batch_execution.packs.tabular import TabularPack
+
         pack = TabularPack()
         attempts: list[ShardAttemptRecord] = []
         for shard in shards:
@@ -314,8 +316,16 @@ def execute_private_wave(
         raise ValueError("private wave operation is not available on the public runner")
     prior = plane.read_attempts(run_id)
     attempts: list[ShardAttemptRecord] = []
-    pack = TabularPack()
-    media_pack = MediaPack()
+    pack = None
+    media_pack = None
+    if private_pack == "tabular-batch":
+        from portable_batch_execution.packs.tabular import TabularPack
+
+        pack = TabularPack()
+    elif private_pack == "media-batch":
+        from portable_batch_execution.packs.media import MediaPack
+
+        media_pack = MediaPack()
     wave_failures = 0
     for shard in shards:
         current = _matching_current_attempts(prior, shard)
@@ -359,6 +369,10 @@ def execute_private_wave(
                         _execution_failure_code(exc, stage="input_parse")
                     ) from None
                 try:
+                    from portable_batch_execution.packs.ml.distilbert_pair_binary_scores import (
+                        execute_distilbert_pair_binary_scores,
+                    )
+
                     result_payload = execute_distilbert_pair_binary_scores(
                         parsed_input,
                         model_a_config=model_a_config,
@@ -486,6 +500,10 @@ def execute_private_wave(
                         )
                     try:
                         if job.operation == "ml.cosine_similarity_matrix":
+                            from portable_batch_execution.packs.ml.cosine_similarity_matrix import (
+                                execute_cosine_similarity_matrix,
+                            )
+
                             result_payload = execute_cosine_similarity_matrix(
                                 parsed_input
                             )
@@ -496,6 +514,10 @@ def execute_private_wave(
                                 result_payload["scores"][0]
                             )
                         elif job.operation == "ml.char_wb_tfidf_logistic_score":
+                            from portable_batch_execution.packs.ml.char_wb_tfidf_logistic_score import (
+                                execute_char_wb_tfidf_logistic_score,
+                            )
+
                             result_payload = execute_char_wb_tfidf_logistic_score(
                                 parsed_input
                             )

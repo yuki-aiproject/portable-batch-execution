@@ -30,3 +30,22 @@ def test_execute_wave_workflow_invokes_worker_with_environment_boundary():
     assert '"$PBE_WAVE_ID"' in workflow
     assert "PBE_WAVE_ID: ${{ inputs.wave_id }}" in workflow
     assert "pytest" not in workflow
+
+
+def test_execute_wave_workflow_bootstraps_base_then_conditional_extras():
+    workflow = (Path(__file__).parents[3] / ".github" / "workflows" / "execute-wave.yml").read_text()
+
+    assert "uv sync --no-dev" in workflow
+    assert "--dev" not in workflow.replace("--no-dev", "")
+    assert "python -m portable_batch_execution.worker.runtime_profile" in workflow
+    assert "uv sync --no-dev --extra tabular" in workflow
+    assert "uv sync --no-dev --extra ml" in workflow
+    assert "uv sync --no-dev --extra distilbert" in workflow
+    assert workflow.index("uv sync --no-dev\n") < workflow.index(
+        "python -m portable_batch_execution.worker.runtime_profile"
+    )
+    assert workflow.index(
+        "python -m portable_batch_execution.worker.runtime_profile"
+    ) < workflow.index("uv sync --no-dev --extra tabular")
+    assert "sudo apt-get install -y --no-install-recommends ffmpeg" in workflow
+    assert workflow.count("sudo apt-get install") == 1
