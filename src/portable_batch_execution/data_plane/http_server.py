@@ -73,12 +73,15 @@ class _PrivateDataPlaneHandler(BaseHTTPRequestHandler):
             body=body,
         )
         self.send_response(status)
+        stream_payload = isinstance(payload, ArtifactContentStream)
         for key, value in headers.items():
+            if stream_payload and key.lower() == "content-length":
+                continue
             self.send_header(key, value)
-        if not isinstance(payload, ArtifactContentStream):
-            data = _response_bytes(payload)
-            if data:
-                self.send_header("Content-Length", str(len(data)))
+        if stream_payload:
+            self.send_header("Content-Length", str(payload.size_bytes))
+        elif data := _response_bytes(payload):
+            self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         if method == "HEAD":
             return

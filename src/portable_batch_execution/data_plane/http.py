@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from hashlib import sha256
 from typing import Any
 from urllib.parse import quote, urlsplit
@@ -14,7 +15,7 @@ from portable_batch_execution.contracts import (
     ShardAttemptRecord,
 )
 
-from .base import RevisionConflictError
+from .base import ArtifactContentStream, RevisionConflictError
 
 
 class PrivateDataPlaneError(RuntimeError):
@@ -22,6 +23,7 @@ class PrivateDataPlaneError(RuntimeError):
 
 
 _HTTP_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
+_ARTIFACT_CHUNK_BYTES = 64 * 1024
 
 
 class HttpPrivateDataPlane:
@@ -77,6 +79,70 @@ class HttpPrivateDataPlane:
 
     def read(self, ref: ArtifactRef) -> bytes:
         return self._request("read artifact", "GET", f"/v1/artifacts/{self._part(ref.object_id, 'artifact object_id')}/content").content
+
+    @staticmethod
+    def _resolve_bounded_stream_size(
+        ref: ArtifactRef, response: httpx.Response
+    ) -> int:
+        header_value = response.headers.get("content-length")
+        header_size: int | None = None
+        if header_value is not None:
+            try:
+                header_size = int(header_value)
+            except ValueError as exc:
+                raise PrivateDataPlaneError(
+                    "private data plane read artifact failed"
+                ) from exc
+            if header_size < 0:
+                raise PrivateDataPlaneError("private data plane read artifact failed")
+        if (
+            header_size is not None
+            and ref.size_bytes is not None
+            and header_size != ref.size_bytes
+        ):
+            raise PrivateDataPlaneError("private data plane read artifact failed")
+        if header_size is not None:
+            return header_size
+        if ref.size_bytes is not None:
+            return ref.size_bytes
+        raise PrivateDataPlaneError("private data plane read artifact failed")
+
+    @staticmethod
+    def _iter_response_chunks(response: httpx.Response) -> Iterator[bytes]:
+        try:
+            try:
+                for chunk in response.iter_bytes(_ARTIFACT_CHUNK_BYTES):
+                    if chunk:
+                        yield chunk
+            except httpx.HTTPError as exc:
+                raise PrivateDataPlaneError(
+                    "private data plane read artifact failed"
+                ) from exc
+        finally:
+            response.close()
+
+    def open_content(self, ref: ArtifactRef) -> ArtifactContentStream:
+        """Stream artifact bytes from the opaque object-id endpoint."""
+        path = f"/v1/artifacts/{self._part(ref.object_id, 'artifact object_id')}/content"
+        request = self._client.build_request("GET", f"{self.base_url}{path}")
+        try:
+            response = self._client.send(request, stream=True)
+        except httpx.HTTPError as exc:
+            raise PrivateDataPlaneError("private data plane read artifact failed") from exc
+        if response.status_code >= 400:
+            response.close()
+            raise PrivateDataPlaneError(
+                f"private data plane read artifact failed with HTTP {response.status_code}"
+            )
+        try:
+            size_bytes = self._resolve_bounded_stream_size(ref, response)
+        except PrivateDataPlaneError:
+            response.close()
+            raise
+        return ArtifactContentStream(
+            size_bytes=size_bytes,
+            chunks=self._iter_response_chunks(response),
+        )
 
     def write(self, data: bytes, media_type: str | None = None) -> ArtifactRef:
         payload = self._json(self._request("write artifact", "POST", "/v1/artifacts", content=data, headers={"Content-Type": media_type or "application/octet-stream"}), "write artifact")
