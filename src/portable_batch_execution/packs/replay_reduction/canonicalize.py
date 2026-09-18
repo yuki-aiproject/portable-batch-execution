@@ -18,6 +18,10 @@ from typing import Any
 
 import polars as pl
 
+from .json_scalar_projection import (
+    JsonScalarProjectionError,
+    apply_json_scalar_projections_to_lazy,
+)
 from .models import (
     BUCKET_COUNT_MAX,
     BUCKET_COUNT_MIN,
@@ -402,6 +406,10 @@ def _single_input_state(
     bucket_count = model.bucket_count
 
     lazy = pl.scan_parquet(str(path))
+    try:
+        lazy = apply_json_scalar_projections_to_lazy(lazy, model.json_scalar_projections)
+    except JsonScalarProjectionError as exc:
+        raise StructuralCanonicalizeError(str(exc)) from exc
     required = (identity_col, normalized_col, *core_fields)
     if sentinel is not None:
         required = required + tuple(sentinel.exact_match_fields)

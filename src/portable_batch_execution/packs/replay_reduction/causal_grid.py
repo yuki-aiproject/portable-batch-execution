@@ -21,6 +21,10 @@ from .canonicalize import (
     bucket_index,
 )
 from .event_window import _as_of_preferred, _row_is_sentinel, _validate_positive_row
+from .json_scalar_projection import (
+    JsonScalarProjectionError,
+    apply_json_scalar_projections_to_lazy,
+)
 from .models import CausalGridExtractRequest
 from .spill_sort import (
     external_sort_lazy_batches,
@@ -346,6 +350,10 @@ def _stream_positive_rows(path: Path, model: CausalGridExtractRequest) -> Iterat
     tie_break = model.tie_break_columns
 
     lazy = pl.scan_parquet(str(path))
+    try:
+        lazy = apply_json_scalar_projections_to_lazy(lazy, profile.json_scalar_projections)
+    except JsonScalarProjectionError as exc:
+        raise StructuralCanonicalizeError(str(exc)) from exc
     required = (
         trade_map.symbol_column,
         trade_map.block_column,
