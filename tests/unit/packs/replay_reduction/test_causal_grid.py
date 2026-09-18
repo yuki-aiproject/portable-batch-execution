@@ -1,11 +1,17 @@
+from itertools import permutations
+
 import polars as pl
 import pytest
+from pydantic import ValidationError
 
 from portable_batch_execution.packs.replay_reduction.canonicalize import (
     StructuralCanonicalizeError,
 )
 from portable_batch_execution.packs.replay_reduction.causal_grid import (
     execute_causal_grid_extract,
+)
+from portable_batch_execution.packs.replay_reduction.models import (
+    CausalGridExtractRequest,
 )
 
 _PROFILE = {
@@ -805,3 +811,265 @@ def test_same_timestamp_witness_block_excluded_from_cutoff(tmp_path):
         ),
     )["rows"][0]
     assert row["causal_cutoff_block"] == 100
+
+
+def test_default_request_serializes_and_executes_unchanged(tmp_path):
+    model = CausalGridExtractRequest.model_validate(_request())
+    assert model.source_order_tie_break is False
+    assert model.sparse_emit_points == ()
+    assert model.causal_witness_mapping.timestamp_mode == "integer_ms"
+    dumped = model.model_dump(mode="json")
+    assert dumped["source_order_tie_break"] is False
+    assert dumped["sparse_emit_points"] == []
+    path = _write(tmp_path / "trades.parquet", [_trade_row(timestamp_ms=9_000)])
+    rows = execute_causal_grid_extract([path], _request())["rows"]
+    assert len(rows) == 1
+    assert rows[0]["grid_timestamp_ms"] == 10_000
+
+
+def test_same_index_bound_to_both_roles_accepted_and_exact_duplicate_rejected(tmp_path):
+    path = _write(tmp_path / "trades.parquet", [_trade_row(block=100, timestamp_ms=9_000)])
+    request = _request(
+        input_roles=(
+            {"input_index": 0, "role": "canonical_trade"},
+            {"input_index": 0, "role": "causal_witness"},
+        ),
+    )
+    CausalGridExtractRequest.model_validate(request)
+    assert execute_causal_grid_extract([path], request)["rows"][0]["causal_cutoff_block"] is None
+
+    duplicate = _request(
+        input_roles=(
+            {"input_index": 0, "role": "canonical_trade"},
+            {"input_index": 0, "role": "canonical_trade"},
+        ),
+    )
+    with pytest.raises(ValidationError):
+        CausalGridExtractRequest.model_validate(duplicate)
+
+
+def test_witness_iso8601_matches_integer_ms_and_rejects_naive_or_invalid(tmp_path):
+    trades = _write(
+        tmp_path / "trades.parquet",
+        [
+            _trade_row(block=100, timestamp_ms=8_000),
+            _trade_row(identity=2, identity_norm="2", block=110, timestamp_ms=9_000),
+        ],
+    )
+    integer_witness = _write(
+        tmp_path / "w_ms.parquet",
+        [
+            _witness_row(block=100, timestamp_ms=8_000),
+            _witness_row(block=120, timestamp_ms=9_500),
+        ],
+    )
+    iso_witness = _write(
+        tmp_path / "w_iso.parquet",
+        [
+            {"block": 100, "ts_iso": "1970-01-01T00:00:08Z"},
+            {"block": 120, "ts_iso": "1970-01-01T00:00:09.500Z"},
+        ],
+    )
+    integer_rows = execute_causal_grid_extract(
+        [trades, integer_witness],
+        _request(
+            input_roles=(
+                {"input_index": 0, "role": "canonical_trade"},
+                {"input_index": 1, "role": "causal_witness"},
+            ),
+        ),
+    )["rows"]
+    iso_request = _request(
+        input_roles=(
+            {"input_index": 0, "role": "canonical_trade"},
+            {"input_index": 1, "role": "causal_witness"},
+        ),
+        causal_witness_mapping={
+            "block_column": "block",
+            "timestamp_column": "ts_iso",
+            "timestamp_mode": "iso8601",
+        },
+    )
+    iso_rows = execute_causal_grid_extract([trades, iso_witness], iso_request)["rows"]
+    assert integer_rows == iso_rows
+
+    naive_witness = _write(
+        tmp_path / "w_naive.parquet",
+        [{"block": 100, "ts_iso": "1970-01-01T00:00:08"}],
+    )
+    with pytest.raises(StructuralCanonicalizeError):
+        execute_causal_grid_extract([trades, naive_witness], iso_request)
+
+    invalid_witness = _write(
+        tmp_path / "w_bad.parquet",
+        [{"block": 100, "ts_iso": "not-a-date"}],
+    )
+    with pytest.raises(StructuralCanonicalizeError):
+        execute_causal_grid_extract([trades, invalid_witness], iso_request)
+
+
+def _tie_witness(tmp_path):
+    return _write(
+        tmp_path / "w.parquet",
+        [_witness_row(block=100, timestamp_ms=8_000), _witness_row(block=110, timestamp_ms=9_500)],
+    )
+
+
+def _tied_trade(identity, price):
+    return _trade_row(
+        identity=identity,
+        identity_norm=str(identity),
+        block=100,
+        timestamp_ms=9_000,
+        price=price,
+    )
+
+
+def test_source_order_tie_break_permutations_single_file(tmp_path):
+    rows = [(1, 1.0), (2, 2.0), (3, 3.0)]
+    for permutation in permutations(rows):
+        trade_path = _write(
+            tmp_path / "trades.parquet",
+            [_tied_trade(identity, price) for identity, price in permutation],
+        )
+        witness = _tie_witness(tmp_path)
+        row = execute_causal_grid_extract(
+            [trade_path, witness],
+            _request(
+                input_roles=(
+                    {"input_index": 0, "role": "canonical_trade"},
+                    {"input_index": 1, "role": "causal_witness"},
+                ),
+                source_order_tie_break=True,
+            ),
+        )["rows"][0]
+        assert row["causal_cutoff_block"] == 100
+        assert _facts_by_id(row)["as_of.0"] == permutation[-1][1]
+
+
+def test_source_order_tie_break_two_files_prefers_later_input_index(tmp_path):
+    first = _write(tmp_path / "a.parquet", [_tied_trade(1, 1.0), _tied_trade(2, 2.0)])
+    second = _write(tmp_path / "b.parquet", [_tied_trade(3, 3.0), _tied_trade(4, 4.0)])
+    witness = _tie_witness(tmp_path)
+    row = execute_causal_grid_extract(
+        [first, second, witness],
+        _request(
+            input_roles=(
+                {"input_index": 0, "role": "canonical_trade"},
+                {"input_index": 1, "role": "canonical_trade"},
+                {"input_index": 2, "role": "causal_witness"},
+            ),
+            source_order_tie_break=True,
+        ),
+    )["rows"][0]
+    assert _facts_by_id(row)["as_of.0"] == 4.0
+
+
+def test_sparse_emit_matches_dense_subset_and_is_deterministic(tmp_path):
+    path = _write(tmp_path / "trades.parquet", [_trade_row(timestamp_ms=9_000)])
+    dense_request = _request(
+        target_symbols=("AAA", "BBB"),
+        emit_grid={
+            "start_timestamp_ms": 10_000,
+            "end_timestamp_ms": 20_000,
+            "step_ms": 5_000,
+        },
+        partition={
+            "emit_start_ms": 10_000,
+            "emit_end_ms": 20_000,
+            "overlap_ms": 60_000,
+            "hard_gap_missing_dates": (),
+        },
+    )
+    dense_rows = execute_causal_grid_extract([path], dense_request)["rows"]
+    sparse_request = {
+        **dense_request,
+        "sparse_emit_points": [
+            {"timestamp_ms": 20_000, "symbols": ["BBB", "AAA"]},
+            {"timestamp_ms": 15_000, "symbols": ["BBB"]},
+        ],
+    }
+    sparse_rows = execute_causal_grid_extract([path], sparse_request)["rows"]
+    assert sparse_rows == [
+        row
+        for row in dense_rows
+        if (row["grid_timestamp_ms"], row["symbol"])
+        in {(15_000, "BBB"), (20_000, "AAA"), (20_000, "BBB")}
+    ]
+    assert [(row["grid_timestamp_ms"], row["symbol"]) for row in sparse_rows] == [
+        (15_000, "BBB"),
+        (20_000, "AAA"),
+        (20_000, "BBB"),
+    ]
+    assert {row["symbol"] for row in sparse_rows} == {"AAA", "BBB"}
+
+
+def test_sparse_emit_enforces_max_output_rows(tmp_path):
+    path = _write(tmp_path / "trades.parquet", [_trade_row(timestamp_ms=9_000)])
+    sparse_request = _request(
+        target_symbols=("AAA", "BBB"),
+        emit_grid={
+            "start_timestamp_ms": 10_000,
+            "end_timestamp_ms": 15_000,
+            "step_ms": 5_000,
+        },
+        partition={
+            "emit_start_ms": 10_000,
+            "emit_end_ms": 15_000,
+            "overlap_ms": 60_000,
+            "hard_gap_missing_dates": (),
+        },
+        sparse_emit_points=[
+            {"timestamp_ms": 10_000, "symbols": ["AAA"]},
+            {"timestamp_ms": 15_000, "symbols": ["BBB"]},
+        ],
+        max_output_rows=1,
+    )
+    with pytest.raises(ValueError, match="output row count exceeds limit"):
+        execute_causal_grid_extract([path], sparse_request)
+
+
+def test_sparse_emit_hard_gap_point_fails_closed(tmp_path):
+    path = _write(tmp_path / "trades.parquet", [_trade_row(timestamp_ms=86_400_000)])
+    sparse_request = _request(
+        emit_grid={
+            "start_timestamp_ms": 86_400_000,
+            "end_timestamp_ms": 86_400_000,
+            "step_ms": 5_000,
+        },
+        partition={
+            "emit_start_ms": 86_400_000,
+            "emit_end_ms": 86_400_000,
+            "overlap_ms": 60_000,
+            "hard_gap_missing_dates": ("1970-01-02",),
+        },
+        sparse_emit_points=[{"timestamp_ms": 86_400_000, "symbols": ["AAA"]}],
+    )
+    with pytest.raises(StructuralCanonicalizeError):
+        execute_causal_grid_extract([path], sparse_request)
+
+
+def test_sparse_emit_points_validate_against_request(tmp_path):
+    base = _request()
+    with pytest.raises(ValidationError):
+        CausalGridExtractRequest.model_validate(
+            {**base, "sparse_emit_points": [{"timestamp_ms": 10_000, "symbols": ["ZZZ"]}]}
+        )
+    with pytest.raises(ValidationError):
+        CausalGridExtractRequest.model_validate(
+            {
+                **base,
+                "sparse_emit_points": [
+                    {"timestamp_ms": 10_000, "symbols": ["AAA"]},
+                    {"timestamp_ms": 10_000, "symbols": ["AAA"]},
+                ],
+            }
+        )
+    with pytest.raises(ValidationError):
+        CausalGridExtractRequest.model_validate(
+            {**base, "sparse_emit_points": [{"timestamp_ms": 10_000, "symbols": ["AAA", "AAA"]}]}
+        )
+    with pytest.raises(ValidationError):
+        CausalGridExtractRequest.model_validate(
+            {**base, "sparse_emit_points": [{"timestamp_ms": 9_999, "symbols": ["AAA"]}]}
+        )

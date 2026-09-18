@@ -125,11 +125,13 @@ class EventWindowExtractRequest(Frozen):
     trailing_windows: tuple[TrailingWindowSpec, ...] = ()
     future_windows: tuple[FutureWindowSpec, ...] = ()
     tie_break_columns: tuple[str, ...] = ("timestamp_ms",)
+    source_order_tie_break: bool = False
 
 
 class CausalWitnessMapping(Frozen):
     block_column: str
     timestamp_column: str
+    timestamp_mode: Literal["integer_ms", "iso8601"] = "integer_ms"
 
 
 class CanonicalTradeInputMapping(Frozen):
@@ -183,6 +185,17 @@ class CausalGridExtractJobParams(Frozen):
     schema_version: Literal["pbe.replay.causal-grid-extract-job.v1"]
 
 
+class SparseEmitPoint(Frozen):
+    timestamp_ms: int
+    symbols: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _symbols_unique(self) -> SparseEmitPoint:
+        if len(set(self.symbols)) != len(self.symbols):
+            raise ValueError("sparse emit point symbols must be unique")
+        return self
+
+
 class CausalGridExtractRequest(Frozen):
     schema_version: Literal["pbe.replay.causal-grid-extract.v1"]
     request_id: str
@@ -197,14 +210,40 @@ class CausalGridExtractRequest(Frozen):
     trailing_windows: tuple[TrailingWindowSpec, ...] = ()
     tie_break_columns: tuple[str, ...] = ("timestamp_ms",)
     max_output_rows: int = Field(default=500_000, ge=1, le=10_000_000)
+    source_order_tie_break: bool = False
+    sparse_emit_points: tuple[SparseEmitPoint, ...] = ()
 
     @model_validator(mode="after")
     def _roles_cover_inputs(self) -> CausalGridExtractRequest:
-        indices = [binding.input_index for binding in self.input_roles]
-        if len(indices) != len(set(indices)):
-            raise ValueError("duplicate input_index in input_roles")
+        pairs = [(binding.input_index, binding.role) for binding in self.input_roles]
+        if len(pairs) != len(set(pairs)):
+            raise ValueError("duplicate input_index and role pair in input_roles")
         if not any(binding.role == "canonical_trade" for binding in self.input_roles):
             raise ValueError("at least one canonical_trade input role is required")
+        return self
+
+    @model_validator(mode="after")
+    def _sparse_emit_points_valid(self) -> CausalGridExtractRequest:
+        if not self.sparse_emit_points:
+            return self
+        target = set(self.target_symbols)
+        timestamps = [point.timestamp_ms for point in self.sparse_emit_points]
+        if len(set(timestamps)) != len(timestamps):
+            raise ValueError("sparse emit point timestamps must be unique")
+        emit = self.emit_grid
+        for point in self.sparse_emit_points:
+            unknown = set(point.symbols) - target
+            if unknown:
+                raise ValueError("sparse emit point symbol not in target_symbols")
+            if (
+                point.timestamp_ms < emit.start_timestamp_ms
+                or point.timestamp_ms > emit.end_timestamp_ms
+            ):
+                raise ValueError("sparse emit point outside emit_grid bounds")
+            if point.timestamp_ms < self.partition.emit_start_ms:
+                raise ValueError("sparse emit point outside partition emit bounds")
+            if point.timestamp_ms > self.partition.emit_end_ms:
+                raise ValueError("sparse emit point outside partition emit bounds")
         return self
 
 
