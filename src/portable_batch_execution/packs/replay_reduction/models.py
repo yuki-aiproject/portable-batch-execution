@@ -514,10 +514,61 @@ class PairedFillReduceRequest(Frozen):
         return self
 
 
+TWO_LEG_PATH_MAX_INPUT_FILES = 64
+TWO_LEG_PATH_MAX_INPUT_BYTES = 512 * 1024 * 1024
+TWO_LEG_PATH_MAX_INPUT_ROWS = 10_000_000
+TWO_LEG_PATH_MAX_OUTPUT_EVENTS = 500_000
+TWO_LEG_PATH_MAX_OUTPUT_BYTES = 256 * 1024 * 1024
+
+
+class TwoLegLifecycleParams(Frozen):
+    entry_z: float = Field(gt=0.0)
+    exit_z: float = Field(gt=0.0)
+    max_signal_holding_sessions: int = Field(ge=1, le=500)
+
+
+class TwoLegPathEvaluateJobParams(Frozen):
+    schema_version: Literal["pbe.replay.two-leg-path-evaluate-job.v1"]
+
+
+class TwoLegPathEvaluateRequest(Frozen):
+    schema_version: Literal["pbe.replay.two-leg-path-evaluate.v1"]
+    request_id: str
+    lifecycle: TwoLegLifecycleParams
+    censor_session_bound: int | None = Field(default=None, ge=0)
+    pair_gross_unit: float = Field(default=1.0, gt=0.0)
+    max_input_files: int = Field(
+        default=TWO_LEG_PATH_MAX_INPUT_FILES,
+        ge=1,
+        le=TWO_LEG_PATH_MAX_INPUT_FILES,
+    )
+    max_input_bytes: int = Field(
+        default=TWO_LEG_PATH_MAX_INPUT_BYTES,
+        ge=1,
+        le=TWO_LEG_PATH_MAX_INPUT_BYTES,
+    )
+    max_input_rows: int = Field(
+        default=TWO_LEG_PATH_MAX_INPUT_ROWS,
+        ge=1,
+        le=TWO_LEG_PATH_MAX_INPUT_ROWS,
+    )
+    max_output_events: int = Field(
+        default=TWO_LEG_PATH_MAX_OUTPUT_EVENTS,
+        ge=1,
+        le=TWO_LEG_PATH_MAX_OUTPUT_EVENTS,
+    )
+    max_output_bytes: int = Field(
+        default=TWO_LEG_PATH_MAX_OUTPUT_BYTES,
+        ge=1,
+        le=TWO_LEG_PATH_MAX_OUTPUT_BYTES,
+    )
+
+
 PARAM_MODELS = {
     "replay.structural_canonicalize": StructuralCanonicalizeParams,
     "replay.event_window_extract": EventWindowExtractJobParams,
     "replay.causal_grid_extract": CausalGridExtractJobParams,
     "replay.structural_canonicalize_merge": StructuralCanonicalizeMergeParams,
     "replay.paired_fill_reduce": PairedFillReduceJobParams,
+    "replay.two_leg_path_evaluate": TwoLegPathEvaluateJobParams,
 }

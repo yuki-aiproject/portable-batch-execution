@@ -600,3 +600,89 @@ def test_private_wave_paired_fill_reduce_zero_rows_publishes_metadata_only():
     assert metadata["summary"]["administrative_row_count"] == 1
     assert metadata["ledger_parquet_ref"] is None
     assert metadata["ledger_parquet_identity"] is None
+
+
+def test_private_wave_two_leg_path_evaluate_dispatches_typed_request():
+    path_payload = _parquet_payload(
+        [
+            {
+                "event_id": "e1",
+                "passthrough_json": '{"k":"e1"}',
+                "signal_idx": 0,
+                "entry_exec_idx": 1,
+                "session_idx": 1,
+                "z": 3.0,
+                "leg0_side": -1,
+                "leg0_weight": 0.5,
+                "leg1_side": 1,
+                "leg1_weight": 0.5,
+                "leg0_raw_open": 100.0,
+                "leg1_raw_open": 50.0,
+                "leg0_raw_close": 100.0,
+                "leg1_raw_close": 50.0,
+                "leg0_observed": True,
+                "leg1_observed": True,
+                "leg0_dividend": 0.0,
+                "leg1_dividend": 0.0,
+                "formation_median_tv_20d": 1e9,
+                "formation_median_tv_60d": 1e9,
+            },
+            {
+                "event_id": "e1",
+                "passthrough_json": '{"k":"e1"}',
+                "signal_idx": 0,
+                "entry_exec_idx": 1,
+                "session_idx": 2,
+                "z": 0.2,
+                "leg0_side": -1,
+                "leg0_weight": 0.5,
+                "leg1_side": 1,
+                "leg1_weight": 0.5,
+                "leg0_raw_open": 100.0,
+                "leg1_raw_open": 50.0,
+                "leg0_raw_close": 100.0,
+                "leg1_raw_close": 50.0,
+                "leg0_observed": True,
+                "leg1_observed": True,
+                "leg0_dividend": 0.0,
+                "leg1_dividend": 0.0,
+                "formation_median_tv_20d": 1e9,
+                "formation_median_tv_60d": 1e9,
+            },
+        ]
+    )
+    request = {
+        "schema_version": "pbe.replay.two-leg-path-evaluate.v1",
+        "request_id": "worker-two-leg",
+        "lifecycle": {
+            "entry_z": 2.0,
+            "exit_z": 0.5,
+            "max_signal_holding_sessions": 20,
+        },
+        "pair_gross_unit": 1.0,
+        "max_output_events": 10,
+    }
+    request_payload = json.dumps(request).encode("utf-8")
+    refs = [
+        _ref("paths", path_payload),
+        ArtifactRef(
+            object_id="request",
+            uri="pbe://private/request",
+            sha256="sha256:" + sha256(request_payload).hexdigest(),
+            size_bytes=len(request_payload),
+            media_type="application/json",
+        ),
+    ]
+    plane = _plane_for_replay(
+        operation="replay.two_leg_path_evaluate",
+        input_refs=refs,
+        operation_params={"schema_version": "pbe.replay.two-leg-path-evaluate-job.v1"},
+    )
+    plane._payloads["paths"] = path_payload
+    plane._payloads["request"] = request_payload
+    attempts = execute_private_wave("opaque-run", "opaque-wave", plane=plane)
+    assert attempts[0].status == "succeeded"
+    assert len(attempts[0].output_refs) >= 1
+    metadata = json.loads(plane._payloads[attempts[0].output_refs[0].object_id].decode())
+    assert metadata["schema_version"] == "pbe.replay.two-leg-path-evaluate-metadata.v1"
+    assert metadata["summary"]["event_count"] == 1

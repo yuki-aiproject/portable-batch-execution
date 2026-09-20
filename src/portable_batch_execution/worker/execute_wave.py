@@ -44,6 +44,9 @@ from portable_batch_execution.packs.replay_reduction.models import (
 from portable_batch_execution.packs.replay_reduction.paired_fill_reduce import (
     publish_paired_fill_reduce_artifacts,
 )
+from portable_batch_execution.packs.replay_reduction.two_leg_path_evaluate import (
+    publish_two_leg_path_evaluate_artifacts,
+)
 
 _WAVE_ID = re.compile(r"wave-[0-9]{4}")
 _PUBLIC_WAVES = frozenset({"wave-0000"})
@@ -86,6 +89,7 @@ _PRIVATE_REPLAY_BATCH_OPS = frozenset(
         "replay.event_window_extract",
         "replay.causal_grid_extract",
         "replay.paired_fill_reduce",
+        "replay.two_leg_path_evaluate",
     }
 )
 _MAX_REPLAY_PARQUET_INPUTS = 64
@@ -740,6 +744,49 @@ def execute_private_wave(
                             ) from None
                         output_rows = int(result_payload["summary"]["ledger_row_count"])
                         output, output_refs = publish_paired_fill_reduce_artifacts(
+                            plane,
+                            result_payload,
+                            artifact_ref_matches_bytes=_artifact_ref_matches_bytes,
+                            shard_stage_failure=_ShardStageFailure,
+                        )
+                        output_digest_value = sha256(output).hexdigest()
+                        publish_single_output = False
+                elif job.operation == "replay.two_leg_path_evaluate":
+                    if len(shard.input_refs) < 2:
+                        raise _ShardStageFailure("input_artifact_invalid")
+                    parquet_refs = shard.input_refs[:-1]
+                    request_ref = shard.input_refs[-1]
+                    if not all(_artifact_ref_is_parquet(ref) for ref in parquet_refs):
+                        raise _ShardStageFailure("input_artifact_invalid")
+                    request_payload = _read_verified_artifact_bytes(plane, request_ref)
+                    try:
+                        parsed_request = json.loads(request_payload.decode("utf-8"))
+                    except (UnicodeDecodeError, ValueError) as exc:
+                        raise _ShardStageFailure(
+                            _execution_failure_code(exc, stage="input_parse")
+                        ) from None
+                    with tempfile.TemporaryDirectory() as temporary:
+                        paths = _materialize_verified_parquet_inputs(
+                            plane, tuple(parquet_refs), Path(temporary)
+                        )
+                        input_rows = sum(_parquet_row_count(path) for path in paths)
+                        try:
+                            result_payload = replay_pack.execute(
+                                job,
+                                shard,
+                                job.operation_params,
+                                {
+                                    "parquet_paths": paths,
+                                    "request": parsed_request,
+                                    "operation": job.operation,
+                                },
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            raise _ShardStageFailure(
+                                _execution_failure_code(exc, stage="pack")
+                            ) from None
+                        output_rows = int(result_payload["summary"]["event_count"])
+                        output, output_refs = publish_two_leg_path_evaluate_artifacts(
                             plane,
                             result_payload,
                             artifact_ref_matches_bytes=_artifact_ref_matches_bytes,

@@ -60,6 +60,7 @@ PACK_OPS = {
         "replay.causal_grid_extract",
         "replay.structural_canonicalize_merge",
         "replay.paired_fill_reduce",
+        "replay.two_leg_path_evaluate",
     },
     "media-batch": {
         "media.decode",
