@@ -78,7 +78,7 @@ jobs:
       - name: Install tabular dependencies
         if: steps.profile.outputs.profile == 'tabular'
         run: |
-          if [ "" = "hf-direct" ]; then
+          if [ "$PBE_MODE" = "hf-direct" ]; then
             uv sync --no-dev --extra tabular --extra hf-direct
           else
             uv sync --no-dev --extra tabular
@@ -86,7 +86,7 @@ jobs:
       - name: Install ml dependencies
         if: steps.profile.outputs.profile == 'ml'
         run: |
-          if [ "" = "hf-direct" ]; then
+          if [ "$PBE_MODE" = "hf-direct" ]; then
             uv sync --no-dev --extra ml --extra hf-direct
           else
             uv sync --no-dev --extra ml
@@ -94,7 +94,7 @@ jobs:
       - name: Install distilbert dependencies
         if: steps.profile.outputs.profile == 'distilbert'
         run: |
-          if [ "" = "hf-direct" ]; then
+          if [ "$PBE_MODE" = "hf-direct" ]; then
             uv sync --no-dev --extra distilbert --extra hf-direct
           else
             uv sync --no-dev --extra distilbert
