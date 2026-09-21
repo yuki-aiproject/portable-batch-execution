@@ -62,3 +62,13 @@ def test_hf_direct_workflow_keeps_existing_modes_and_no_test_runner():
     assert "--mode private" in workflow
     assert "--mode public" in workflow
     assert "pytest" not in workflow
+
+
+def test_hf_direct_profile_sync_retains_hf_extra_and_mode_guard():
+    workflow = _text()
+    guard = 'if [ "$PBE_MODE" = "hf-direct" ]; then'
+    assert workflow.count(guard) == 3
+    assert "uv sync --no-dev --extra tabular --extra hf-direct" in workflow
+    assert "uv sync --no-dev --extra ml --extra hf-direct" in workflow
+    assert "uv sync --no-dev --extra distilbert --extra hf-direct" in workflow
+    assert 'if [ "" = "hf-direct" ]; then' not in workflow
