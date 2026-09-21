@@ -26,7 +26,9 @@ from .nullable_json_projection import apply_nullable_json_projections_to_lazy
 from .row_invariants import invariant_columns, validate_row_invariants
 
 RESULT_SCHEMA_VERSION = "pbe.replay.paired-fill-reduce-result.v1"
+RESULT_SCHEMA_VERSION_V2 = "pbe.replay.paired-fill-reduce-result.v2"
 METADATA_SCHEMA_VERSION = "pbe.replay.paired-fill-reduce-metadata.v1"
+METADATA_SCHEMA_VERSION_V2 = "pbe.replay.paired-fill-reduce-metadata.v2"
 CARRY_SCHEMA_VERSION = "pbe.replay.paired-fill-reduce-carry.v1"
 LEDGER_PARQUET_MEDIA_TYPE = "application/vnd.apache.parquet"
 _SOURCE_INPUT_INDEX = "_source_input_index"
@@ -216,6 +218,143 @@ def _source_lineage(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _row_matches_transition_marker(row: dict[str, Any], model: PairedFillReduceRequest) -> bool:
+    spec = model.state_transition_handling
+    if spec is None:
+        return False
+    return all(row.get(column) == expected for column, expected in spec.marker_exact_match_fields.items())
+
+
+def _validate_transition_row_invariants(row: dict[str, Any], model: PairedFillReduceRequest) -> None:
+    spec = model.state_transition_handling
+    if spec is None:
+        validate_row_invariants(row, model.row_invariants)
+        return
+    bypass = set(spec.bypass_row_invariant_columns)
+    for invariant in model.row_invariants:
+        columns = set(invariant_columns((invariant,)))
+        if columns & bypass:
+            continue
+        validate_row_invariants(row, (invariant,))
+
+
+def _numeric_close(left: Any, right: float, *, atol: float, rtol: float) -> bool:
+    try:
+        value = float(left)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(value) and math.isclose(value, right, abs_tol=atol, rel_tol=rtol)
+
+
+def _state_transition_ledger_row(
+    rows: list[dict[str, Any]],
+    *,
+    group_key: tuple[Any, ...],
+    model: PairedFillReduceRequest,
+) -> dict[str, Any]:
+    spec = model.state_transition_handling
+    if spec is None or len(rows) != PAIRED_FILL_MAX_PAIR_SIZE:
+        raise StructuralCanonicalizeError("state transition group size invalid")
+    if not all(_row_matches_transition_marker(row, model) for row in rows):
+        raise StructuralCanonicalizeError("state transition marker mismatch")
+    if not _cores_match(rows, model.pair_mapping.measurement_core_fields):
+        raise StructuralCanonicalizeError("measurement core fields disagree")
+    for field_name in spec.shared_fields:
+        if rows[0].get(field_name) != rows[1].get(field_name):
+            raise StructuralCanonicalizeError("state transition shared fields disagree")
+    for row in rows:
+        for field_name in spec.zero_numeric_fields:
+            if not _numeric_close(
+                row.get(field_name),
+                0.0,
+                atol=spec.absolute_tolerance,
+                rtol=spec.relative_tolerance,
+            ):
+                raise StructuralCanonicalizeError("state transition zero field invalid")
+
+    role_column = model.pair_mapping.pair_role_column
+    by_role = {row.get(role_column): row for row in rows}
+    if set(by_role) != {spec.state_owner_role_value, spec.protocol_counterparty_role_value}:
+        raise StructuralCanonicalizeError("state transition roles invalid")
+    owner = by_role[spec.state_owner_role_value]
+    counterparty = by_role[spec.protocol_counterparty_role_value]
+    start_column = model.pair_mapping.start_position_column
+    owner_start = owner.get(start_column)
+    counterparty_start = counterparty.get(start_column)
+    if not _numeric_close(
+        counterparty_start,
+        0.0,
+        atol=spec.absolute_tolerance,
+        rtol=spec.relative_tolerance,
+    ):
+        raise StructuralCanonicalizeError("state transition counterparty start invalid")
+    try:
+        owner_start_num = float(owner_start)
+    except (TypeError, ValueError):
+        raise StructuralCanonicalizeError("state transition owner start invalid")
+    if not math.isfinite(owner_start_num) or math.isclose(
+        owner_start_num,
+        0.0,
+        abs_tol=spec.absolute_tolerance,
+        rel_tol=spec.relative_tolerance,
+    ):
+        raise StructuralCanonicalizeError("state transition owner start invalid")
+    owner_signed = _resolve_signed_execution(owner, model.pair_mapping)
+    counterparty_signed = _resolve_signed_execution(counterparty, model.pair_mapping)
+    if not math.isclose(
+        owner_signed,
+        -owner_start_num,
+        abs_tol=spec.absolute_tolerance,
+        rel_tol=spec.relative_tolerance,
+    ):
+        raise StructuralCanonicalizeError("state transition owner does not flatten")
+    if not math.isclose(
+        owner_start_num + owner_signed,
+        0.0,
+        abs_tol=spec.absolute_tolerance,
+        rel_tol=spec.relative_tolerance,
+    ):
+        raise StructuralCanonicalizeError("state transition owner post position invalid")
+    if not math.isclose(
+        counterparty_signed,
+        -owner_signed,
+        abs_tol=spec.absolute_tolerance,
+        rel_tol=spec.relative_tolerance,
+    ):
+        raise StructuralCanonicalizeError("state transition counterparty quantity invalid")
+
+    owner_role = _role_name(
+        owner,
+        pair_role_column=model.pair_mapping.pair_role_column,
+        aggressor_value=model.pair_mapping.aggressor_role_value,
+        passive_value=model.pair_mapping.passive_role_value,
+    )
+    if owner_role is None:
+        raise StructuralCanonicalizeError("state transition owner role invalid")
+    owner_record = _participant_record(
+        owner,
+        role=owner_role,
+        pair_mapping=model.pair_mapping,
+    )
+    owner_record["post_position"] = 0.0
+
+    lineage = _source_lineage(rows)
+    return {
+        "identity_namespace": _identity_namespace(group_key, model),
+        "ledger_identity": _ledger_identity(group_key),
+        "classification": "state_transition",
+        "measurement_core": _measurement_core(rows[0], model.pair_mapping.measurement_core_fields),
+        **lineage,
+        "state_owner": owner_record,
+        "protocol_counterparty": {
+            "inventory_effect": "none",
+            **_source_cursor(counterparty),
+        },
+        "economic_fill": False,
+        "economic_notional": 0.0,
+    }
+
+
 def _participants_same_identity(rows: list[dict[str, Any]], pair_mapping) -> bool | None:
     column = pair_mapping.participant_identity_column
     if column is None:
@@ -280,6 +419,7 @@ class _Reducer:
     boundary_carry_group_key: tuple[Any, ...] | None = None
     ledger_rows: list[dict[str, Any]] = field(default_factory=list)
     administrative_row_count: int = 0
+    state_transition_count: int = 0
 
     def __post_init__(self) -> None:
         carry = self.model.partition.incoming_carry
@@ -307,6 +447,8 @@ class _Reducer:
     def _finalize_singleton(self, group_key: tuple[Any, ...]) -> None:
         if len(self.pending) != 1:
             raise StructuralCanonicalizeError("singleton group size invalid")
+        if _row_matches_transition_marker(self.pending[0], self.model):
+            raise StructuralCanonicalizeError("state transition group is incomplete")
         self._append_ledger(
             _ledger_row(
                 self.pending,
@@ -321,14 +463,24 @@ class _Reducer:
     def _finalize_pair(self, group_key: tuple[Any, ...]) -> None:
         if len(self.pending) != PAIRED_FILL_MAX_PAIR_SIZE:
             raise StructuralCanonicalizeError("pair group size invalid")
-        self._append_ledger(
-            _ledger_row(
+        transition_marked = any(
+            _row_matches_transition_marker(row, self.model) for row in self.pending
+        )
+        if transition_marked:
+            row = _state_transition_ledger_row(
+                self.pending,
+                group_key=group_key,
+                model=self.model,
+            )
+            self.state_transition_count += 1
+        else:
+            row = _ledger_row(
                 self.pending,
                 classification="complete_pair",
                 group_key=group_key,
                 model=self.model,
             )
-        )
+        self._append_ledger(row)
         self.closed_group_keys.add(group_key)
         self._clear_pending()
 
@@ -387,7 +539,10 @@ class _Reducer:
             normalized_col=normalized_col,
             core_fields=self.model.pair_mapping.measurement_core_fields,
         )
-        validate_row_invariants(row, self.model.row_invariants)
+        if _row_matches_transition_marker(row, self.model):
+            _validate_transition_row_invariants(row, self.model)
+        else:
+            validate_row_invariants(row, self.model.row_invariants)
         group_key = _group_key(row, self.model)
         self._ingest_economic_row(row, group_key)
 
@@ -472,6 +627,19 @@ def _required_columns(model: PairedFillReduceRequest) -> tuple[str, ...]:
         if pair.participant_identity_column is not None
         else ()
     )
+    transition = model.state_transition_handling
+    transition_columns: tuple[str, ...] = ()
+    if transition is not None:
+        transition_columns = tuple(
+            dict.fromkeys(
+                [
+                    *transition.marker_exact_match_fields,
+                    *transition.zero_numeric_fields,
+                    *transition.shared_fields,
+                    *transition.bypass_row_invariant_columns,
+                ]
+            )
+        )
     return tuple(
         dict.fromkeys(
             [
@@ -484,6 +652,7 @@ def _required_columns(model: PairedFillReduceRequest) -> tuple[str, ...]:
                 *pair.measurement_core_fields,
                 *passthrough,
                 *participant_identity,
+                *transition_columns,
                 *invariant_columns(model.row_invariants),
                 *admin_fields,
                 *(
@@ -584,6 +753,7 @@ def execute_paired_fill_reduce(
         "request_id": model.request_id,
         "ledger_row_count": len(reducer.ledger_rows),
         "administrative_row_count": reducer.administrative_row_count,
+        "state_transition_count": reducer.state_transition_count,
         "exception_row_count": len(exceptions),
         "input_bytes": input_bytes,
     }
@@ -600,8 +770,13 @@ def execute_paired_fill_reduce(
         f"sha256:{sha256(ledger_bytes).hexdigest()}" if ledger_bytes else None
     )
 
+    result_schema_version = (
+        RESULT_SCHEMA_VERSION_V2
+        if model.state_transition_handling is not None
+        else RESULT_SCHEMA_VERSION
+    )
     return {
-        "schema_version": RESULT_SCHEMA_VERSION,
+        "schema_version": result_schema_version,
         "summary": summary,
         "exceptions": exceptions,
         "ledger_rows": reducer.ledger_rows,
@@ -623,8 +798,13 @@ def build_paired_fill_metadata(
     *,
     ledger_parquet_ref: Any | None,
 ) -> dict[str, Any]:
+    metadata_schema_version = (
+        METADATA_SCHEMA_VERSION_V2
+        if result_payload.get("schema_version") == RESULT_SCHEMA_VERSION_V2
+        else METADATA_SCHEMA_VERSION
+    )
     return {
-        "schema_version": METADATA_SCHEMA_VERSION,
+        "schema_version": metadata_schema_version,
         "result_schema_version": result_payload["schema_version"],
         "summary": result_payload["summary"],
         "exceptions": result_payload["exceptions"],
