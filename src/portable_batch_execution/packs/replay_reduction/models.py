@@ -647,6 +647,65 @@ class PairedFillReduceRequest(Frozen):
         raise ValueError("state_transition_handling requires paired-fill v2 or v3")
 
 
+class VerifiedReplayPayloadDigest(Frozen):
+    schema_version: Literal["pbe.replay.verified-payload-digest.v1"]
+    sha256: str = Field(min_length=64, max_length=64)
+    size_bytes: int = Field(ge=0)
+    media_type: str = Field(min_length=1)
+
+    @field_validator("sha256")
+    @classmethod
+    def _validate_sha256_hex(cls, value: str) -> str:
+        digest = value.removeprefix("sha256:")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("sha256 must be a lowercase hex digest")
+        return digest
+
+
+class CarrySourceOrdinalBinding(Frozen):
+    schema_version: Literal["pbe.replay.carry-source-ordinal-binding.v1"]
+    source_input_index: int = Field(ge=0)
+    source_row_offset: int = Field(ge=0)
+    global_source_ordinal: int = Field(ge=0)
+
+
+class PairedFillLedgerShardCanonicalizeBinding(Frozen):
+    shard_ordinal: int = Field(ge=0)
+    ledger: VerifiedReplayPayloadDigest
+    reducer_metadata: VerifiedReplayPayloadDigest
+    local_index_to_global_ordinal: tuple[int, ...] = Field(min_length=1)
+    incoming_carry: PairedFillCarryState | None = None
+    incoming_carry_source_binding: CarrySourceOrdinalBinding | None = None
+
+    @model_validator(mode="after")
+    def _require_carry_binding_when_carry_pending(self) -> PairedFillLedgerShardCanonicalizeBinding:
+        carry = self.incoming_carry
+        if carry is None or carry.pending_row is None:
+            if self.incoming_carry_source_binding is not None:
+                raise ValueError("incoming_carry_source_binding requires incoming_carry pending_row")
+            return self
+        if self.incoming_carry_source_binding is None:
+            raise ValueError("incoming_carry pending_row requires incoming_carry_source_binding")
+        return self
+
+
+class PairedFillLedgerCanonicalFinalizeRequest(Frozen):
+    schema_version: Literal["pbe.replay.paired-fill-ledger-canonical-finalize.v1"]
+    request_id: str = Field(min_length=1)
+    partition_id: str = Field(min_length=1)
+    shard: PairedFillLedgerShardCanonicalizeBinding
+    terminal: bool = True
+    max_output_bytes: int = Field(
+        default=PAIRED_FILL_MAX_OUTPUT_BYTES,
+        ge=1,
+        le=PAIRED_FILL_MAX_OUTPUT_BYTES,
+    )
+
+
+class PairedFillLedgerCanonicalFinalizeJobParams(Frozen):
+    schema_version: Literal["pbe.replay.paired-fill-ledger-canonical-finalize-job.v1"]
+
+
 class TradePathScenarioEvaluateJobParams(Frozen):
     schema_version: Literal["pbe.replay.trade-path-scenario-evaluate-job.v1"]
 
@@ -663,6 +722,7 @@ PARAM_MODELS = {
     "replay.causal_grid_extract": CausalGridExtractJobParams,
     "replay.structural_canonicalize_merge": StructuralCanonicalizeMergeParams,
     "replay.paired_fill_reduce": PairedFillReduceJobParams,
+    "replay.paired_fill_ledger_canonical_finalize": PairedFillLedgerCanonicalFinalizeJobParams,
     "replay.trade_path_scenario_evaluate": TradePathScenarioEvaluateJobParams,
     "replay.trade_path_scenario_evaluate_fixed_set": TradePathScenarioEvaluateFixedSetJobParams,
 }

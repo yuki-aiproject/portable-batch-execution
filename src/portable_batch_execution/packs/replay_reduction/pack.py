@@ -13,6 +13,9 @@ from .canonicalize import (
 from .causal_grid import execute_causal_grid_extract
 from .event_window import execute_event_window_extract
 from .models import PARAM_MODELS
+from .paired_fill_ledger_canonical_finalize import (
+    execute_paired_fill_ledger_canonical_finalize,
+)
 from .paired_fill_reduce import execute_paired_fill_reduce
 from .trade_path_scenario_evaluate import execute_trade_path_scenario_evaluate
 from .trade_path_scenario_evaluate_fixed_set import (
@@ -61,6 +64,21 @@ class ReplayReductionPack:
             if paths is None:
                 raise TypeError("paired fill reduce requires parquet_paths")
             return execute_paired_fill_reduce(paths, request)
+        if operation == "replay.paired_fill_ledger_canonical_finalize":
+            request = context["request"]
+            ledger_bytes = context.get("ledger_bytes")
+            reducer_metadata_bytes = context.get("reducer_metadata_bytes")
+            if ledger_bytes is None or reducer_metadata_bytes is None:
+                raise TypeError(
+                    "paired fill ledger canonical finalize requires verified byte payloads"
+                )
+            cross_shard_state = context.get("cross_shard_state")
+            return execute_paired_fill_ledger_canonical_finalize(
+                ledger_bytes,
+                reducer_metadata_bytes,
+                request,
+                cross_shard_state=cross_shard_state,
+            )
         if operation == "replay.trade_path_scenario_evaluate":
             batch = context.get("batch")
             if batch is None:
@@ -102,6 +120,10 @@ class ReplayReductionPack:
             return execute_causal_grid_extract(paths or [], request or {})
         if operation == "replay.paired_fill_reduce":
             return execute_paired_fill_reduce(paths or [], request or {})
+        if operation == "replay.paired_fill_ledger_canonical_finalize":
+            raise TypeError(
+                "paired fill ledger canonical finalize requires verified byte payloads"
+            )
         if operation == "replay.trade_path_scenario_evaluate":
             batch = params or request
             if batch is None:
