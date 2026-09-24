@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 
 import polars as pl
+import pytest
 
 from portable_batch_execution.contracts import ArtifactRef
 from portable_batch_execution.packs.replay_reduction.canonicalize import (
@@ -516,6 +517,35 @@ def test_private_wave_trade_path_scenario_evaluate_json_batch():
     )
     assert result["event_summary"]["n"] == 1
     assert result["records"][0]["net_pnl"] == 1.0
+
+
+def test_private_wave_rejects_paired_fill_ledger_canonical_finalize():
+    refs = [
+        _ref("ledger", _parquet_payload([{"identity": 1}])),
+        ArtifactRef(
+            object_id="metadata",
+            uri="pbe://private/metadata",
+            sha256="sha256:" + sha256(b"{}").hexdigest(),
+            size_bytes=2,
+            media_type="application/json",
+        ),
+        ArtifactRef(
+            object_id="request",
+            uri="pbe://private/request",
+            sha256="sha256:" + sha256(b"{}").hexdigest(),
+            size_bytes=2,
+            media_type="application/json",
+        ),
+    ]
+    plane = _plane_for_replay(
+        operation="replay.paired_fill_ledger_canonical_finalize",
+        input_refs=refs,
+        operation_params={
+            "schema_version": "pbe.replay.paired-fill-ledger-canonical-finalize-job.v1",
+        },
+    )
+    with pytest.raises(ValueError, match="not available on the public runner"):
+        execute_private_wave("opaque-run", "opaque-wave", plane=plane)
 
 
 def test_private_wave_paired_fill_reduce_dispatches_typed_request():

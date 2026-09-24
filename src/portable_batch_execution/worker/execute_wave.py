@@ -33,10 +33,6 @@ from portable_batch_execution.packs.replay_reduction.models import (
     BUCKET_COUNT_MAX,
 )
 from portable_batch_execution.packs.replay_reduction.pack import ReplayReductionPack
-from portable_batch_execution.packs.replay_reduction.paired_fill_ledger_canonical_finalize import (
-    PairedFillLedgerCanonicalizeCrossShardState,
-    publish_paired_fill_ledger_canonical_finalize_artifacts,
-)
 from portable_batch_execution.packs.replay_reduction.paired_fill_reduce import (
     publish_paired_fill_reduce_artifacts,
 )
@@ -89,7 +85,6 @@ _PRIVATE_REPLAY_BATCH_OPS = frozenset(
         "replay.event_window_extract",
         "replay.causal_grid_extract",
         "replay.paired_fill_reduce",
-        "replay.paired_fill_ledger_canonical_finalize",
         "replay.trade_path_scenario_evaluate",
         FIXED_SET_OPERATION,
     }
@@ -758,58 +753,7 @@ def execute_private_wave(
                         output_digest_value = sha256(output).hexdigest()
                         publish_single_output = False
                 elif job.operation == "replay.paired_fill_ledger_canonical_finalize":
-                    if len(shard.input_refs) != 3:
-                        raise _ShardStageFailure("input_artifact_invalid")
-                    ledger_ref, metadata_ref, request_ref = shard.input_refs
-                    if ledger_ref.media_type not in _PRIVATE_REPLAY_PARQUET_MEDIA_TYPES:
-                        raise _ShardStageFailure("input_artifact_invalid")
-                    if metadata_ref.media_type != "application/json":
-                        raise _ShardStageFailure("input_artifact_invalid")
-                    ledger_bytes = _read_verified_artifact_bytes(plane, ledger_ref)
-                    reducer_metadata_bytes = _read_verified_artifact_bytes(
-                        plane, metadata_ref
-                    )
-                    request_payload = _read_verified_artifact_bytes(plane, request_ref)
-                    try:
-                        parsed_request = json.loads(request_payload.decode("utf-8"))
-                    except (UnicodeDecodeError, ValueError) as exc:
-                        raise _ShardStageFailure(
-                            _execution_failure_code(exc, stage="input_parse")
-                        ) from None
-                    cross_shard_state = PairedFillLedgerCanonicalizeCrossShardState.from_dict(
-                        parsed_request.pop("cross_shard_state_in", None)
-                    )
-                    input_rows = 0
-                    try:
-                        result_payload = replay_pack.execute(
-                            job,
-                            shard,
-                            job.operation_params,
-                            {
-                                "ledger_bytes": ledger_bytes,
-                                "reducer_metadata_bytes": reducer_metadata_bytes,
-                                "request": parsed_request,
-                                "cross_shard_state": cross_shard_state,
-                                "operation": job.operation,
-                            },
-                        )
-                    except Exception as exc:  # noqa: BLE001
-                        raise _ShardStageFailure(
-                            _execution_failure_code(exc, stage="pack")
-                        ) from None
-                    output_rows = int(
-                        result_payload["summary"]["canonical_ledger_row_count"]
-                    )
-                    output, output_refs = (
-                        publish_paired_fill_ledger_canonical_finalize_artifacts(
-                            plane,
-                            result_payload,
-                            artifact_ref_matches_bytes=_artifact_ref_matches_bytes,
-                            shard_stage_failure=_ShardStageFailure,
-                        )
-                    )
-                    output_digest_value = sha256(output).hexdigest()
-                    publish_single_output = False
+                    raise _ShardStageFailure("hf_direct_required")
                 elif job.operation == FIXED_SET_OPERATION:
                     raise _ShardStageFailure("hf_direct_required")
                 elif job.operation == "replay.trade_path_scenario_evaluate":

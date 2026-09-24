@@ -30,13 +30,17 @@ from portable_batch_execution.worker.hf_dataset_resolve import (
 )
 from portable_batch_execution.worker.hf_direct import (
     HF_DIRECT_OPERATIONS,
+    PAIRED_FILL_LEDGER_CANONICAL_FINALIZE_OPERATION,
     PAIRED_FILL_OPERATION,
     HfDirectExecutionError,
     assert_no_private_data_plane_dependency,
     derive_result_object_path_from_input_object_path,
+    artifact_ref_is_hf_bucket,
+    execute_hf_direct_paired_fill_ledger_canonical_finalize_shard,
     execute_hf_direct_paired_fill_reduce_shard,
     execute_hf_direct_trade_path_fixed_set_shard,
     hf_direct_enabled,
+    paired_fill_ledger_canonical_finalize_shard_input_digest,
     paired_fill_shard_input_digest,
     validate_hf_direct_transport_profile,
 )
@@ -333,6 +337,40 @@ def execute_hf_direct_wave(
                 output_hf_refs=output_hf_refs,
                 input_object_path=input_object_path,
                 input_digest=paired_fill_shard_input_digest(shard),
+            )
+        if job.operation == PAIRED_FILL_LEDGER_CANONICAL_FINALIZE_OPERATION:
+            if len(shard.input_refs) != 3:
+                raise HfDirectExecutionError(
+                    "paired-ledger canonical finalize shard input layout invalid"
+                )
+            for ref in shard.input_refs:
+                if not artifact_ref_is_hf_bucket(ref):
+                    raise HfDirectExecutionError(
+                        "paired-ledger canonical finalize inputs must be HF bucket refs"
+                    )
+            request_ref = shard.input_refs[2]
+            input_object_path = parse_hf_object_uri(request_ref.uri)
+            metadata_ref, output_hf_refs, _summary = (
+                execute_hf_direct_paired_fill_ledger_canonical_finalize_shard(
+                    transport=transport,
+                    replay_pack=replay_pack,
+                    job=job,
+                    shard=shard,
+                    bucket_prefix=bucket_prefix,
+                    public_revision=public_revision,
+                    manifest_digest=manifest_digest,
+                    wave_id=wave.wave_id,
+                )
+            )
+            return _shard_result_row(
+                shard,
+                status="succeeded",
+                output_hf_ref=artifact_ref_to_hf_bucket_ref(metadata_ref),
+                output_hf_refs=output_hf_refs,
+                input_object_path=input_object_path,
+                input_digest=paired_fill_ledger_canonical_finalize_shard_input_digest(
+                    shard
+                ),
             )
         raise HfDirectExecutionError("unsupported HF-direct operation")
 

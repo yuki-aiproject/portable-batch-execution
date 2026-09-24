@@ -704,6 +704,8 @@ class PairedFillLedgerCanonicalFinalizeRequest(Frozen):
 
 class PairedFillLedgerCanonicalFinalizeJobParams(Frozen):
     schema_version: Literal["pbe.replay.paired-fill-ledger-canonical-finalize-job.v1"]
+    transport_profile: Literal["hf_bucket_direct", "hf_direct"] | None = None
+    bucket_prefix: str | None = None
 
 
 class TradePathScenarioEvaluateJobParams(Frozen):

@@ -60,6 +60,7 @@ PACK_OPS = {
         "replay.causal_grid_extract",
         "replay.structural_canonicalize_merge",
         "replay.paired_fill_reduce",
+        "replay.paired_fill_ledger_canonical_finalize",
         "replay.trade_path_scenario_evaluate",
         "replay.trade_path_scenario_evaluate_fixed_set",
     },

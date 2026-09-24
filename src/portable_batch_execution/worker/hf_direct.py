@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from portable_batch_execution.contracts import ArtifactRef
+from portable_batch_execution.packs.replay_reduction.paired_fill_ledger_canonical_finalize import (
+    PairedFillLedgerCanonicalizeCrossShardState,
+    publish_paired_fill_ledger_canonical_finalize_artifacts,
+)
 from portable_batch_execution.packs.replay_reduction.paired_fill_reduce import (
     publish_paired_fill_reduce_artifacts,
 )
@@ -44,7 +48,16 @@ class HfDirectExecutionError(RuntimeError):
 
 
 PAIRED_FILL_OPERATION = "replay.paired_fill_reduce"
-HF_DIRECT_OPERATIONS = frozenset({FIXED_SET_OPERATION, PAIRED_FILL_OPERATION})
+PAIRED_FILL_LEDGER_CANONICAL_FINALIZE_OPERATION = (
+    "replay.paired_fill_ledger_canonical_finalize"
+)
+HF_DIRECT_OPERATIONS = frozenset(
+    {
+        FIXED_SET_OPERATION,
+        PAIRED_FILL_OPERATION,
+        PAIRED_FILL_LEDGER_CANONICAL_FINALIZE_OPERATION,
+    }
+)
 HF_DIRECT_TRANSPORT_PROFILES = frozenset({"hf_bucket_direct", "hf_direct"})
 
 
@@ -211,6 +224,10 @@ def validate_hf_direct_transport_profile(job) -> None:
         if profile not in HF_DIRECT_TRANSPORT_PROFILES:
             raise HfDirectExecutionError("transport_profile mismatch")
         return
+    if job.operation == PAIRED_FILL_LEDGER_CANONICAL_FINALIZE_OPERATION:
+        if profile not in HF_DIRECT_TRANSPORT_PROFILES:
+            raise HfDirectExecutionError("transport_profile mismatch")
+        return
     raise HfDirectExecutionError("unsupported HF-direct operation")
 
 
@@ -235,6 +252,49 @@ def paired_fill_shard_output_object_path(
         f"{prefix}/paired-fill-results/{revision}/{manifest_digest}/"
         f"{wave_id}/{shard_id}-{role}-{tag}.{extension}"
     ).lstrip("/")
+
+
+def paired_fill_ledger_canonical_finalize_shard_output_object_path(
+    *,
+    bucket_prefix: str,
+    public_revision: str,
+    manifest_digest: str,
+    wave_id: str,
+    shard_id: str,
+    role: str,
+    extension: str,
+) -> str:
+    revision = public_revision.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise HfDirectExecutionError("public_revision must be a git commit sha")
+    tag = sha256(
+        f"{revision}|{manifest_digest}|{wave_id}|{shard_id}|{role}|paired-ledger-canonical".encode()
+    ).hexdigest()[:16]
+    prefix = bucket_prefix.rstrip("/")
+    return (
+        f"{prefix}/paired-ledger-canonical-results/{revision}/{manifest_digest}/"
+        f"{wave_id}/{shard_id}-{role}-{tag}.{extension}"
+    ).lstrip("/")
+
+
+def paired_fill_ledger_canonical_finalize_shard_input_digest(shard) -> str:
+    if len(shard.input_refs) != 3:
+        raise HfDirectExecutionError(
+            "paired-ledger canonical finalize shard requires ledger, metadata, and request"
+        )
+    ledger_ref, metadata_ref, request_ref = shard.input_refs
+    material = {
+        "ledger_sha256": ledger_ref.sha256,
+        "ledger_size_bytes": ledger_ref.size_bytes,
+        "metadata_sha256": metadata_ref.sha256,
+        "metadata_size_bytes": metadata_ref.size_bytes,
+        "request_sha256": request_ref.sha256,
+        "request_size_bytes": request_ref.size_bytes,
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return sha256(encoded).hexdigest()
 
 
 def paired_fill_shard_input_digest(shard) -> str:
@@ -374,3 +434,102 @@ def execute_hf_direct_paired_fill_reduce_shard(
     summary["output_hf_ref"] = artifact_ref_to_hf_bucket_ref(metadata_ref)
     summary["output_hf_refs"] = output_hf_refs
     return metadata_ref, output_hf_refs, summary
+
+
+def execute_hf_direct_paired_fill_ledger_canonical_finalize_shard(
+    *,
+    transport: HfBucketTransport,
+    replay_pack,
+    job,
+    shard,
+    bucket_prefix: str,
+    public_revision: str,
+    manifest_digest: str,
+    wave_id: str,
+) -> tuple[ArtifactRef, list[dict[str, Any]], dict[str, Any]]:
+    if job.operation != PAIRED_FILL_LEDGER_CANONICAL_FINALIZE_OPERATION:
+        raise HfDirectExecutionError("unsupported HF-direct operation")
+    validate_hf_direct_transport_profile(job)
+    assert_no_private_data_plane_dependency()
+    if len(shard.input_refs) != 3:
+        raise HfDirectExecutionError(
+            "paired-ledger canonical finalize shard requires ledger, metadata, and request"
+        )
+    ledger_ref, metadata_ref, request_ref = shard.input_refs
+    for ref in (ledger_ref, metadata_ref, request_ref):
+        if not artifact_ref_is_hf_bucket(ref):
+            raise HfDirectExecutionError(
+                "paired-ledger canonical finalize inputs must be HF bucket refs"
+            )
+
+    ledger_bytes = transport.read_verified(hf_bucket_ref_from_artifact(ledger_ref))
+    reducer_metadata_bytes = transport.read_verified(
+        hf_bucket_ref_from_artifact(metadata_ref)
+    )
+    request_payload = transport.read_verified(hf_bucket_ref_from_artifact(request_ref))
+    try:
+        parsed_request = json.loads(request_payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise HfDirectExecutionError(
+            "paired-ledger canonical finalize request is not valid JSON"
+        ) from exc
+    if not isinstance(parsed_request, dict):
+        raise HfDirectExecutionError(
+            "paired-ledger canonical finalize request must be a JSON object"
+        )
+    cross_shard_state = PairedFillLedgerCanonicalizeCrossShardState.from_dict(
+        parsed_request.pop("cross_shard_state_in", None)
+    )
+
+    result_payload = replay_pack.execute(
+        job,
+        shard,
+        job.operation_params,
+        {
+            "ledger_bytes": ledger_bytes,
+            "reducer_metadata_bytes": reducer_metadata_bytes,
+            "request": parsed_request,
+            "cross_shard_state": cross_shard_state,
+            "operation": job.operation,
+        },
+    )
+
+    canonical_ledger_bytes = bytes(result_payload.get("canonical_ledger_bytes") or b"")
+    output_paths: list[str] = []
+    if canonical_ledger_bytes:
+        output_paths.append(
+            paired_fill_ledger_canonical_finalize_shard_output_object_path(
+                bucket_prefix=bucket_prefix,
+                public_revision=public_revision,
+                manifest_digest=manifest_digest,
+                wave_id=wave_id,
+                shard_id=shard.shard_id,
+                role="ledger",
+                extension="parquet",
+            )
+        )
+    output_paths.append(
+        paired_fill_ledger_canonical_finalize_shard_output_object_path(
+            bucket_prefix=bucket_prefix,
+            public_revision=public_revision,
+            manifest_digest=manifest_digest,
+            wave_id=wave_id,
+            shard_id=shard.shard_id,
+            role="metadata",
+            extension="json",
+        )
+    )
+    plane = _SequentialHfBucketPlane(transport, output_paths)
+    _metadata_bytes, published_refs = publish_paired_fill_ledger_canonical_finalize_artifacts(
+        plane,
+        result_payload,
+        artifact_ref_matches_bytes=_artifact_ref_matches_bytes,
+        shard_stage_failure=HfDirectExecutionError,
+    )
+
+    metadata_ref_out = published_refs[0]
+    output_hf_refs = [artifact_ref_to_hf_bucket_ref(ref) for ref in published_refs]
+    summary = dict(result_payload.get("summary") or {})
+    summary["output_hf_ref"] = artifact_ref_to_hf_bucket_ref(metadata_ref_out)
+    summary["output_hf_refs"] = output_hf_refs
+    return metadata_ref_out, output_hf_refs, summary
