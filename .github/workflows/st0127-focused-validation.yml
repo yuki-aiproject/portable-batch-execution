@@ -1,0 +1,23 @@
+name: ST-0127 focused validation
+
+on:
+  push:
+    branches:
+      - validation/st0127-focused-20260926
+
+permissions:
+  contents: read
+
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@22695119d769bdb6f7032ad67b9bca0ef8c4a174
+      - run: uv sync --dev
+      - run: uv lock --check
+      - run: uv run ruff check src/portable_batch_execution/broker/hf_direct.py src/portable_batch_execution/broker/planning.py tests/unit/broker/test_planning.py tests/unit/broker/test_unix_broker_hf_direct.py
+      - run: uv run pytest tests/unit/broker/test_planning.py tests/unit/broker/test_unix_broker_hf_direct.py
