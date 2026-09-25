@@ -171,3 +171,46 @@ def test_char_wb_service_request_passes_param_validation(tmp_path):
         response = service.handle_payload(_UID, request)
     assert response.error_code != "operation_params_invalid"
     assert response.status == "succeeded"
+
+
+_PAIRED_LEDGER_CANONICAL_FINALIZE_JOB_PARAMS = {
+    "schema_version": "pbe.replay.paired-fill-ledger-canonical-finalize-job.v1",
+    "transport_profile": "hf_direct",
+}
+
+
+def test_broker_allows_paired_ledger_canonical_finalize():
+    assert broker_allows_operation(
+        "replay-batch", "replay.paired_fill_ledger_canonical_finalize"
+    )
+
+
+def test_paired_ledger_canonical_finalize_uses_typed_job_params():
+    validated = canonical_operation_params(
+        "replay-batch",
+        "replay.paired_fill_ledger_canonical_finalize",
+        _PAIRED_LEDGER_CANONICAL_FINALIZE_JOB_PARAMS,
+    )
+    assert validated["schema_version"] == (
+        "pbe.replay.paired-fill-ledger-canonical-finalize-job.v1"
+    )
+    assert validated["transport_profile"] == "hf_direct"
+
+
+def test_paired_ledger_canonical_finalize_rejects_extra_job_params():
+    with pytest.raises(ValueError):
+        canonical_operation_params(
+            "replay-batch",
+            "replay.paired_fill_ledger_canonical_finalize",
+            {**_PAIRED_LEDGER_CANONICAL_FINALIZE_JOB_PARAMS, "extra": 1},
+        )
+
+
+def test_existing_fixed_set_remains_allowed_regression():
+    assert broker_allows_operation(
+        "replay-batch", "replay.trade_path_scenario_evaluate_fixed_set"
+    )
+
+
+def test_existing_paired_fill_reduce_remains_allowed_regression():
+    assert broker_allows_operation("replay-batch", "replay.paired_fill_reduce")

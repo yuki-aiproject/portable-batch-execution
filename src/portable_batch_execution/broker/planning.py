@@ -24,6 +24,7 @@ from portable_batch_execution.data_plane.base import RevisionConflictError
 from portable_batch_execution.data_plane.local import LocalFilesystemDataPlane
 from portable_batch_execution.packs import MLPack, TabularPack
 from portable_batch_execution.packs.replay_reduction.models import (
+    PairedFillLedgerCanonicalFinalizeJobParams,
     PairedFillReduceJobParams,
     TradePathScenarioEvaluateFixedSetJobParams,
     TradePathScenarioEvaluateJobParams,
@@ -50,6 +51,7 @@ _BROKER_REPLAY_BATCH_OPERATIONS = frozenset(
         "replay.trade_path_scenario_evaluate",
         FIXED_SET_OPERATION,
         "replay.paired_fill_reduce",
+        "replay.paired_fill_ledger_canonical_finalize",
     }
 )
 _BROKER_PACKS = frozenset(
@@ -91,6 +93,10 @@ def canonical_operation_params(
             return PairedFillReduceJobParams.model_validate(params).model_dump(
                 mode="json"
             )
+        if operation == "replay.paired_fill_ledger_canonical_finalize":
+            return PairedFillLedgerCanonicalFinalizeJobParams.model_validate(
+                params
+            ).model_dump(mode="json")
         return TradePathScenarioEvaluateJobParams.model_validate(params).model_dump(
             mode="json"
         )

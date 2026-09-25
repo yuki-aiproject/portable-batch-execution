@@ -6,7 +6,10 @@ import httpx
 
 from portable_batch_execution.backends.github_actions import GitHubActionsBackend
 from portable_batch_execution.broker.config import BrokerConfig
-from portable_batch_execution.broker.hf_direct import BrokerHfDirectExecuteResponse
+from portable_batch_execution.broker.hf_direct import (
+    BrokerHfDirectExecuteResponse,
+    parse_hf_direct_request,
+)
 from portable_batch_execution.broker.service import UnixBrokerService
 from portable_batch_execution.broker.state import BrokerRequestStore
 from portable_batch_execution.controller.a1_controller import A1Controller
@@ -211,3 +214,25 @@ def test_legacy_fixed_set_with_input_b64_rejected(tmp_path):
     response = service.handle_payload(_UID, legacy)
     assert response.status == "failed"
     assert response.error_code == "request_invalid"
+
+
+def test_hf_direct_request_accepts_paired_ledger_canonical_finalize():
+    request = _hf_request()
+    request["operation"] = "replay.paired_fill_ledger_canonical_finalize"
+    request["operation_params"] = {
+        "schema_version": "pbe.replay.paired-fill-ledger-canonical-finalize-job.v1",
+        "transport_profile": "hf_direct",
+    }
+    parsed = parse_hf_direct_request(request)
+    assert parsed.operation == "replay.paired_fill_ledger_canonical_finalize"
+
+
+def test_hf_direct_request_existing_operations_regression():
+    assert parse_hf_direct_request(_hf_request()).operation == _FIXED_SET_OPERATION
+    paired = _hf_request()
+    paired["operation"] = "replay.paired_fill_reduce"
+    paired["operation_params"] = {
+        "schema_version": "pbe.replay.paired-fill-reduce-job.v1",
+        "transport_profile": "hf_direct",
+    }
+    assert parse_hf_direct_request(paired).operation == "replay.paired_fill_reduce"
