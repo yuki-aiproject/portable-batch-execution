@@ -296,6 +296,7 @@
         "tabular-batch",
         "acquisition-batch",
         "replay-eval-batch",
+        "replay-batch",
         "ml-batch",
         "media-batch"
       ],

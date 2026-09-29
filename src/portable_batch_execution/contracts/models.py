@@ -54,6 +54,12 @@ PACK_OPS = {
         "ml.cosine_similarity_matrix",
         "ml.distilbert_pair_binary_scores",
     },
+    "replay-batch": {
+        "replay.structural_canonicalize",
+        "replay.event_window_extract",
+        "replay.causal_grid_extract",
+        "replay.structural_canonicalize_merge",
+    },
     "media-batch": {
         "media.decode",
         "media.extract_audio",
@@ -247,6 +253,7 @@ class JobSpec(Frozen):
         "tabular-batch",
         "acquisition-batch",
         "replay-eval-batch",
+        "replay-batch",
         "ml-batch",
         "media-batch",
     ]
